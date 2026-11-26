@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CropCast: rain-driven crop map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  :root{
+    --bg:#eef2f4; --panel:#ffffff; --ink:#14232e; --muted:#5d6e79; --line:#d5dee3;
+    --rain:#1f6fb2; --rain-soft:#a9cdea; --field:#2f7a4d; --warn:#b3412b;
+    --radius:10px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#0f1a21; --panel:#16252f; --ink:#e6eef3; --muted:#92a5b1; --line:#2a3d4a;
+           --rain:#5ea7e6; --rain-soft:#2b4f6d; --field:#6cc28b; --warn:#ee8b72; }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{font-family:"Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink);
+       display:flex;flex-direction:column;font-size:15px;line-height:1.45}
+  header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+  header h1{font-size:19px;margin:0 8px 0 0;font-weight:700;letter-spacing:-.01em}
+  form.search{display:flex;gap:6px;flex:1;min-width:220px;max-width:460px}
+  input[type=search]{flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+  button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid var(--rain);background:var(--rain);color:#fff;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;color:var(--rain)}
+  button:focus-visible,input:focus-visible{outline:3px solid var(--rain-soft);outline-offset:1px}
+  #searchout{font-size:13px;color:var(--muted)}
+  main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 390px}
+  #map-wrap{position:relative;min-height:0}
+  #map{position:absolute;inset:0}
+  #scan{position:absolute;z-index:500;top:12px;right:12px;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+  aside{overflow-y:auto;background:var(--panel);border-left:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:18px}
+  aside h2{font-size:15px;margin:0 0 8px;font-weight:700}
+  .muted{color:var(--muted)} .err{color:var(--warn)}
+  .stats{display:flex;gap:18px;margin:6px 0 10px}
+  .stats b{font-size:22px;display:block;line-height:1.1}
+  .stats span{font-size:12px;color:var(--muted)}
+  .bars{width:100%;height:64px;display:block}
+  .pick{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+  .pick .em{font-size:24px;width:34px;text-align:center}
+  .pick .meter{flex:1}
+  .pick .track{height:6px;border-radius:3px;background:var(--line);margin-top:4px;overflow:hidden}
+  .pick .fill{height:100%;background:var(--field)}
+  .pick small{color:var(--muted)}
+  .legend-row{display:flex;align-items:center;gap:8px;padding:3px 0}
+  .dot{width:12px;height:12px;border-radius:50%}
+  code,pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+  pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);padding:8px;border-radius:8px;margin:6px 0}
+  .crop{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:17px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45)}
+  .pin{width:18px;height:18px;border-radius:50%;background:var(--rain);border:3px solid #fff;box-shadow:0 0 0 2px var(--rain)}
+  .note{font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px}
+  @media (max-width:820px){
+    main{grid-template-columns:1fr;grid-template-rows:55vh auto}
+    aside{border-left:0;border-top:1px solid var(--line)}
+    body{height:auto;min-height:100%}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CropCast</h1>
+  <form class="search" hx-get="/search" hx-trigger="submit" hx-target="#searchout">
+    <input id="q" type="search" placeholder="Search a town or region" aria-label="Search a place" required>
+    <button type="submit">Go</button>
+  </form>
+  <span id="searchout"></span>
+  <span style="flex:1"></span>
+  <button class="ghost" hx-get="/connect" hx-target="#web3out">Connect wallet</button>
+</header>
+
+<main>
+  <section id="map-wrap">
+    <div id="map"></div>
+    <button id="scan" hx-get="/grid" hx-target="#legend" hx-trigger="click, load delay:700ms">Scan this view</button>
+  </section>
+
+  <aside>
+    <div id="suggestions" hx-get="/advice" hx-trigger="mapclick" hx-target="this">
+      <h2>Crop suggestions</h2>
+      <p class="muted">Click anywhere on the map to see the last 30 days of rain, the 7-day forecast and the crops that fit best.</p>
+    </div>
+
+    <div>
+      <h2>Best crop across this map view</h2>
+      <div id="legend"><p class="muted">Scanning…</p></div>
+    </div>
+
+    <div>
+      <h2>Signed field report</h2>
+      <div id="web3out"><p class="muted">Connect a wallet to sign a tamper-evident report of the location you picked. No gas, no transaction.</p></div>
+    </div>
+
+    <p class="note">Rain and temperature come from Open-Meteo. Crop fit uses simple temperature and rainfall ranges for the last 30 days, so treat it as a quick guide, not an agronomy plan. Check long-term climate and soil with your local extension office before planting.</p>
+  </aside>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/2.0.4/htmx.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script>
+/* ---------- crop rules: ideal mean temp (°C) and 30-day rain (mm) ---------- */
+const CROPS = [
+  {n:'Maize',     e:'🌽', c:'#e0a800', t:[18,27], r:[60,150]},
+  {n:'Beans',     e:'🫘', c:'#a0522d', t:[15,24], r:[50,130]},
+  {n:'Rice',      e:'🌾', c:'#2e9f9a', t:[22,30], r:[150,400]},
+  {n:'Sorghum',   e:'🌿', c:'#c0603a', t:[22,33], r:[30,90]},
+  {n:'Wheat',     e:'🥖', c:'#c9a45c', t:[10,22], r:[40,100]},
+  {n:'Potatoes',  e:'🥔', c:'#8a6d4b', t:[10,20], r:[50,120]},
+  {n:'Tea',       e:'🍃', c:'#2f7a4d', t:[13,24], r:[100,250]},
+  {n:'Coffee',    e:'☕', c:'#6b3f2a', t:[15,25], r:[80,200]},
+  {n:'Cassava',   e:'🍠', c:'#b5527a', t:[22,32], r:[50,150]},
+  {n:'Bananas',   e:'🍌', c:'#d4b800', t:[23,30], r:[100,250]},
+];
+const trap = (v,[lo,hi],m) => (v>=lo && v<=hi) ? 1 : Math.max(0, 1 - (v<lo ? lo-v : v-hi)/m);
+const rank = (rain,temp) => CROPS
+  .map(c => ({...c, s: trap(temp,c.t,6) * trap(rain,c.r,c.r[1]*0.6)}))
+  .sort((a,b) => b.s - a.s);
+
+const esc = s => String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const state = {sel:null, last:null, signer:null};
+
+/* ---------- map (Leaflet + OpenStreetMap tiles) ---------- */
+const map = L.map('map').setView([-0.5, 37.5], 7);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 18, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+const cells = L.layerGroup().addTo(map);
+const pin = L.marker([0,0], {icon: L.divIcon({className:'', html:'<div class="pin"></div>', iconSize:[18,18], iconAnchor:[9,9]})});
+
+function select(lat, lng){
+  state.sel = {lat, lng};
+  pin.setLatLng([lat,lng]).addTo(map);
+  htmx.trigger('#suggestions', 'mapclick');
+}
+map.on('click', e => select(e.latlng.lat, e.latlng.lng));
+
+/* ---------- weather API (Open-Meteo, no key) ---------- */
+function summarize(j){
+  const p = j.daily.precipitation_sum, t = j.daily.temperature_2m_mean;
+  const sum = a => a.reduce((x,y) => x + (y||0), 0);
+  const tp = t.slice(0,30).filter(v => v != null);
+  return { rain30: sum(p.slice(0,30)), fc7: sum(p.slice(30)),
+           temp: tp.length ? tp.reduce((a,b) => a+b, 0)/tp.length : 20, daily: p };
+}
+async function weather(points){
+  const q = new URLSearchParams({
+    latitude:  points.map(p => p[0].toFixed(3)).join(','),
+    longitude: points.map(p => p[1].toFixed(3)).join(','),
+    daily: 'precipitation_sum,temperature_2m_mean',
+    past_days: 30, forecast_days: 7, timezone: 'auto'
+  });
+  const r = await fetch('https://api.open-meteo.com/v1/forecast?' + q);
+  if (!r.ok) throw new Error('Weather service returned ' + r.status + '. Try again in a minute.');
+  const j = await r.json();
+  return (Array.isArray(j) ? j : [j]).map(summarize);
+}
+
+function rainChart(daily){
+  const max = Math.max(5, ...daily.map(v => v||0)), W = 300, H = 64, bw = W/daily.length;
+  const bars = daily.map((v,i) => {
+    const h = Math.max(1, (v||0)/max*(H-6));
+    return `<rect x="${(i*bw+0.5).toFixed(1)}" y="${(H-h).toFixed(1)}" width="${(bw-1).toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="${i<30 ? 'var(--rain)' : 'var(--rain-soft)'}"/>`;
+  }).join('');
+  return `<svg class="bars" viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily rain, last 30 days and next 7 days">${bars}
+    <line x1="${30*bw}" x2="${30*bw}" y1="0" y2="${H}" stroke="var(--muted)" stroke-dasharray="2 3"/></svg>
+    <div class="muted" style="font-size:12px;display:flex;justify-content:space-between"><span>30 days ago</span><span>today</span><span>+7 days</span></div>`;
+}
+
+/* ---------- HTMX "routes": each hx-get path is answered in the browser ---------- */
+async function advice(){
+  const {lat,lng} = state.sel;
+  const [w] = await weather([[lat,lng]]);
+  const ranked = rank(w.rain30, w.temp);
+  state.last = {lat, lng, w, top: ranked[0]};
+  const rows = ranked.slice(0,3).map(c => `
+    <div class="pick"><div class="em">${c.e}</div>
+      <div class="meter"><b>${c.n}</b> <small>${Math.round(c.s*100)}% fit</small>
+        <div class="track"><div class="fill" style="width:${Math.round(c.s*100)}%"></div></div>
+        <small>${c.t[0]}–${c.t[1]} °C, ${c.r[0]}–${c.r[1]} mm per month</small></div></div>`).join('');
+  return `<h2>Crop suggestions</h2>
+    <div class="muted" style="font-size:13px">${lat.toFixed(3)}, ${lng.toFixed(3)}</div>
+    <div class="stats">
+      <div><b>${Math.round(w.rain30)} mm</b><span>rain, last 30 days</span></div>
+      <div><b>${Math.round(w.fc7)} mm</b><span>forecast, next 7 days</span></div>
+      <div><b>${w.temp.toFixed(1)} °C</b><span>mean temperature</span></div>
+    </div>${rainChart(w.daily)}${rows}`;
+}
+
+async function grid(){
+  const b = map.getBounds(), rows = 4, cols = 5, pts = [];
+  const s = Math.max(-85, b.getSouth()), n = Math.min(85, b.getNorth());
+  for (let i=0;i<rows;i++) for (let j=0;j<cols;j++)
+    pts.push([s + (i+.5)*(n-s)/rows, b.getWest() + (j+.5)*(b.getEast()-b.getWest())/cols]);
+  const ws = await weather(pts);
+  cells.clearLayers();
+  const tally = {};
+  ws.forEach((w,i) => {
+    const top = rank(w.rain30, w.temp)[0];
+    tally[top.n] = (tally[top.n]||0) + 1;
+    const m = L.marker(pts[i], {icon: L.divIcon({className:'', iconSize:[30,30], iconAnchor:[15,15],
+      html:`<div class="crop" style="background:${top.c}">${top.e}</div>`})});
+    m.bindTooltip(`${top.n}: ${Math.round(w.rain30)} mm, ${w.temp.toFixed(1)} °C`);
+    m.on('click', () => select(pts[i][0], pts[i][1]));
+    cells.addLayer(m);
+  });
+  return Object.entries(tally).sort((a,b) => b[1]-a[1]).map(([name,k]) => {
+    const c = CROPS.find(x => x.n === name);
+    return `<div class="legend-row"><span class="dot" style="background:${c.c}"></span>${c.e} <b>${name}</b><span class="muted">${k} of ${pts.length} areas</span></div>`;
+  }).join('');
+}
+
+async function search(){
+  const q = document.getElementById('q').value.trim();
+  const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=1&name=' + encodeURIComponent(q));
+  const j = await r.json();
+  if (!j.results || !j.results.length) throw new Error('No place found for "' + q + '".');
+  const p = j.results[0];
+  map.flyTo([p.latitude, p.longitude], 9);
+  map.once('moveend', () => { select(p.latitude, p.longitude); htmx.trigger('#scan','click'); });
+  return esc(p.name + (p.country ? ', ' + p.country : ''));
+}
+
+/* ---------- Web3 (ethers + any EIP-1193 wallet) ---------- */
+async function connect(){
+  if (!window.ethereum) throw new Error('No wallet found. Install MetaMask or another browser wallet, then reload.');
+  const provider = new ethers.BrowserProvider(window.ethereum);
+  state.signer = await provider.getSigner();
+  const addr = await state.signer.getAddress();
+  return `<p>Connected as <code>${esc(addr.slice(0,6) + '…' + addr.slice(-4))}</code></p>
+    <button hx-get="/sign" hx-target="#signout">Sign field report</button><div id="signout"></div>`;
+}
+async function sign(){
+  if (!state.signer) throw new Error('Connect a wallet first.');
+  if (!state.last) throw new Error('Click the map first so there is a location to report on.');
+  const {lat,lng,w,top} = state.last;
+  const msg = `CropCast field report\nLocation: ${lat.toFixed(3)}, ${lng.toFixed(3)}\nDate: ${new Date().toISOString()}\n` +
+              `Rain, last 30 days: ${Math.round(w.rain30)} mm\nMean temperature: ${w.temp.toFixed(1)} C\n` +
+              `Best-fit crop: ${top.n}\nData source: Open-Meteo`;
+  const sig = await state.signer.signMessage(msg);
+  const who = ethers.verifyMessage(msg, sig);
+  return `<pre>${esc(msg)}</pre><div class="muted" style="font-size:12px">Signature</div><pre>${esc(sig)}</pre>
+          <div class="muted" style="font-size:12px">Verified signer: <code>${esc(who)}</code></div>`;
+}
+
+/* ---------- glue: HTMX asks, these functions answer ---------- */
+const routes = {'/advice':advice, '/grid':grid, '/search':search, '/connect':connect, '/sign':sign};
+document.body.addEventListener('htmx:beforeRequest', async e => {
+  const handler = routes[new URL(e.detail.requestConfig.path, location.href).pathname];
+  if (!handler) return;
+  e.preventDefault();
+  const target = e.detail.target;
+  target.innerHTML = '<p class="muted">Loading…</p>';
+  try { target.innerHTML = await handler(); }
+  catch (err) { target.innerHTML = '<p class="err">' + esc(err.message || err) + '</p>'; }
+  htmx.process(target);
+});
+</script>
+</body>
+</html>
